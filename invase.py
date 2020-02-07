@@ -6,8 +6,8 @@ class Invase(object):
         self.predictor = predictor_model()
         self.baseline = predictor_model()
         self.selector = selector_model()
-        self._error_fn = error_fn
-        self._norm_coeff = norm_coeff
+        self.error_fn = error_fn
+        self.norm_coeff = norm_coeff
 
         self.predictor_train_loss = tf.keras.metrics.Mean(name='predictor_train_loss')
         self.baseline_train_loss = tf.keras.metrics.Mean(name='baseline_train_loss')
@@ -23,12 +23,13 @@ class Invase(object):
         return tf.cast(mask, dtype=x.dtype)
 
     def _selector_loss(self, predictor_error, baseline_error, selection_vectors, selection_probs):
-        # Obtain log(\pi(s))
+        # Obtain log(pi(s))
         sel_log_probs = tf.math.reduce_sum(selection_vectors * tf.math.log(selection_probs) +
             (1 - selection_vectors) * tf.math.log(1 - selection_probs), axis=1)
         # Obtain ||s||
         sel_norm = tf.math.reduce_sum(selection_vectors, axis=1)
 
+        error = predictor_error - baseline_error
         # Loss function from the original paper:
         # sel_error = (error + self._norm_coeff * sel_norm) * sel_log_probs
         # Loss function used in published code:
@@ -41,8 +42,8 @@ class Invase(object):
     def train_step(self, features, labels, optimizer):
         with tf.GradientTape() as baseline_tape:
             # Get train loss for baseline
-            baseline_predictions = baseline_model(features, training=True)
-            baseline_error = self._error_fn(labels, baseline_predictions)
+            baseline_predictions = self.baseline(features, training=True)
+            baseline_error = self.error_fn(labels, baseline_predictions)
             baseline_loss = tf.math.reduce_mean(baseline_error)
 
         with tf.GradientTape() as selector_tape:
@@ -56,14 +57,14 @@ class Invase(object):
             with tf.GradientTape() as predictor_tape:
                 # Obtain train loss for predictor
                 predictor_predictions = self.predictor(selected_features, training=True)
-                predictor_error = self._error_fn(labels, predictor_predictions)
+                predictor_error = self.error_fn(labels, predictor_predictions)
                 predictor_loss = tf.math.reduce_mean(predictor_error)
             
             # Calculate selector error
             selector_loss = self._selector_loss(predictor_error, baseline_error, selection_vectors, selection_probs)
 
         # Update gradients for predictor and selector
-        predictor_gradients = predictor_tape.gradient(predictor_loss_reg, self.predictor.trainable_variables)
+        predictor_gradients = predictor_tape.gradient(predictor_loss, self.predictor.trainable_variables)
         baseline_gradients = baseline_tape.gradient(baseline_loss, self.baseline.trainable_variables)
         selector_gradients = selector_tape.gradient(selector_loss, self.selector.trainable_variables)
         gradients = predictor_gradients + baseline_gradients + selector_gradients
@@ -74,21 +75,21 @@ class Invase(object):
         self.baseline_train_loss(baseline_loss)
         self.selector_train_loss(selector_loss)
 
-        return predictor_predictions, baseline_predictions
+        return predictor_predictions
 
     @tf.function
     def test_step(self, features, labels):
         predictor_predictions = self.predictor(features, training=False)
-        predictor_loss = self._error_fn(labels, predictor_predictions)
+        predictor_loss = self.error_fn(labels, predictor_predictions)
 
         baseline_predictions = self.baseline(features, training=False)
-        baseline_loss = self._error_fn(labels, baseline_predictions)
+        baseline_loss = self.error_fn(labels, baseline_predictions)
 
         # Update metrics
         self.baseline_test_loss(predictor_loss)
         self.predictor_test_loss(predictor_loss)
 
-        return predictor_predictions, baseline_predictions
+        return predictor_predictions
 
     def reset_metrics(self):
         # Reset train metrics
