@@ -1,9 +1,8 @@
 """
-Script for running INVASE or NON-INVASE on the logical AND experiment in the NON-INVASE paper
+Script for running INVASE or NON-INVASE on the synthetic data sets from Yoon et al. (2019)
 """
 import argparse
 import matplotlib.pyplot as plt
-from matplotlib import rc
 import numpy as np
 import os
 import tensorflow as tf
@@ -12,22 +11,19 @@ from tensorflow.keras import Model
 
 from non_invase import NonInvase
 from invase import Invase
+from synthetic_data import generate_data
 
 # Data constants
-N_FEATURES = 11
 N_TRAIN = 10000
-N_TEST = 1000
-SCALE = 10
+N_TEST = 10000
+N_FEATURES = 11
+N_TOP_SELECTED = 4
 
 # Parser constants
-DEFAULT_EPOCHS = 100
+DEFAULT_EPOCHS = 1000
 DEFAULT_METHOD = 'NON-INVASE'
-DEFAULT_INVASE_COEFF = 0.1
-DEFAULT_NON_INVASE_COEFF = 0.01
-
-# Configure environment
-np.random.seed(1)
-rc('text', usetex=True)
+DEFAULT_INVASE_COEFF = 0.5
+DEFAULT_NON_INVASE_COEFF = 0.001
 
 # Create parser
 parser = argparse.ArgumentParser()
@@ -38,16 +34,16 @@ parser.add_argument(
     default=DEFAULT_METHOD
 )
 parser.add_argument(
+    "--data",
+    help="sets variable selection method to use",
+    choices=['Syn1', 'Syn2', 'Syn3', 'Syn4', 'Syn5', 'Syn6'],
+    default='Syn1'
+)
+parser.add_argument(
     "--epochs",
     help="sets number of epochs to train for",
     type=int,
     default=DEFAULT_EPOCHS
-)
-parser.add_argument(
-    "--coeff",
-    help="regularisation coefficient",
-    type=float,
-    default=None
 )
 args = parser.parse_args()
 
@@ -58,39 +54,12 @@ if args.coeff is None:
         args.coeff = DEFAULT_NON_INVASE_COEFF
 
 # Generate train/test data
-def logit(x):
-    first = np.divide(1, 1 + np.exp(- SCALE * x[:, 0]))
-    second = np.divide(1, 1 + np.exp(- SCALE * x[:, 1]))
-    log = (first * second)
-    return log
-
-def invase_test(x):
-    l = np.exp(x[:, 0] * x[:, 1])
-
-x_train = np.random.normal(0, 1, size=(N_TRAIN, N_FEATURES)).astype('float32')
-x_test = np.random.normal(0, 1, size=(N_TEST, N_FEATURES)).astype('float32')
-
-y_train_prob = logit(x_train)
-y_train = np.random.binomial(n=1, p=y_train_prob, size=(1, N_TRAIN)).T.astype('float32')
-
-y_test_prob = logit(x_test)
-y_test = np.random.binomial(n=1, p=y_test_prob, size=(1, N_TEST)).T.astype('float32')
-
-x_quadrant_test = np.concatenate((
-        np.array([[1, 1], [1, -1], [-1, 1], [-1, -1]]),
-        np.ones((4, 9))
-    ), axis=1)
+x_train, y_train, sel_truth_train = generate_data(args.data, N_TRAIN)
+x_test, y_test, sel_truth_test = generate_data(args.data, N_TEST)
 
 # Plot test data
-scatter = plt.scatter(x_test[:, 0], x_test[:, 1], c=y_test[:, 0])
-plt.colorbar(scatter)
-axes = plt.gca()
-axes.set_xlim([-3, 3])
-axes.set_ylim([-3, 3])
-plt.xlabel('$x_1$')
-plt.ylabel('$x_2$')
-plt.title(r'$y$ over $x_1$ and $x_2$')
-plt.show()
+# plt.scatter(x_test[:, 0], x_test[:, 1], c=y_test[:, 0])
+# plt.show()
 
 # Create train and test datasets
 train_ds = tf.data.Dataset.from_tensor_slices(
@@ -130,11 +99,42 @@ error_fn = tf.keras.losses.SparseCategoricalCrossentropy(reduction=tf.keras.loss
 
 # Create INVASE or NON-INVASE loss
 if args.method == 'INVASE':
-    invase_object = Invase(MyModel, SelectorModel, error_fn, norm_coeff=args.coeff)
+    invase_object = Invase(MyModel, SelectorModel, error_fn, norm_coeff=0.5)
 elif args.method == 'NON-INVASE':
-    invase_object = NonInvase(MyModel, SelectorModel, error_fn, prior_coeff=args.coeff)
+    invase_object = NonInvase(MyModel, SelectorModel, error_fn, prior_coeff=0.001)
 else:
     raise ValueError('invalid method given')
+
+def performance_metrics():
+    # Evaluating TPR and FDR for top k selection
+    sel_probs = invase_object.selector(x_test)
+    selection_pred = np.zeros(N_FEATURES)
+    # Get index rank
+    index_rank = np.argsort(sel_probs, axis=-1)
+    true_positive_rate = np.zeros(N_TEST)
+    false_discovery_rate = np.zeros(N_TEST)
+    for i in range(N_TEST):
+        # Create vector of top k feature selection
+        selection_pred[:] = 0
+        selection_pred[index_rank[i, -N_TOP_SELECTED:]] = 1
+        # Get desired selectin
+        selection_truth = sel_truth_test[i]
+
+        # Calculate TPR and FDR
+        true_pos = np.dot(selection_truth, selection_pred)
+        false_pos = np.dot((1 - selection_truth), selection_pred)
+        false_neg = np.dot(selection_truth, (1 - selection_pred))
+
+        true_positive_rate[i] = true_pos / (true_pos + false_neg)
+        false_discovery_rate[i] = false_pos / (true_pos + false_pos)
+
+    # Print means and variances
+    tpr_mean = np.mean(true_positive_rate)
+    tpr_var = np.var(true_positive_rate)
+    fdr_mean = np.mean(false_discovery_rate)
+    fdr_var = np.var(false_discovery_rate)
+
+    return tpr_mean, tpr_var, fdr_mean, fdr_var
 
 # Accuracy metrics
 predictor_train_accuracy = tf.keras.metrics.SparseCategoricalAccuracy(name='predictor_train_accuracy')
@@ -186,32 +186,8 @@ for epoch in range(args.epochs):
     print("Selection probs mean:    ", sel_probs_mean)
     print("Selection probs variance:", sel_probs_variance)
 
-    quadrant_sel_probs = invase_object.selector(x_quadrant_test)
-    print(quadrant_sel_probs[:, :2])
+print("\nFinal Evaluation:")
+tpr_mean, tpr_var, fdr_mean, fdr_var = performance_metrics()
+print(f"TPR: mean {tpr_mean}, variance {tpr_var}")
+print(f"FDR: mean {fdr_mean}, variance {fdr_var}")
 
-# Plot selection prob of first feature on (x_1, x_2) plane
-sel_probs = invase_object.selector(x_test)
-plt.grid()
-scatter = plt.scatter(x_test[:, 0], x_test[:, 1], c=sel_probs[:, 0])
-plt.colorbar(scatter)
-axes = plt.gca()
-axes.set_xlim([-3, 3])
-axes.set_ylim([-3, 3])
-plt.xlabel('$x_1$')
-plt.ylabel('$x_2$')
-plt.title(r'$\pi^\theta_1(x)$ over $x_1$ and $x_2$')
-
-# Plot selection prob of second feature on (x_1, x_2) plane
-plt.figure()
-sel_probs = invase_object.selector(x_test)
-plt.grid()
-scatter = plt.scatter(x_test[:, 0], x_test[:, 1], c=sel_probs[:, 1])
-plt.colorbar(scatter)
-axes = plt.gca()
-axes.set_xlim([-3, 3])
-axes.set_ylim([-3, 3])
-plt.xlabel('$x_1$')
-plt.ylabel('$x_2$')
-plt.title(r'$\pi^\theta_2(x)$ over $x_1$ and $x_2$')
-
-plt.show()
