@@ -1,4 +1,9 @@
+"""
+Script for running INVASE or NON-INVASE on the logical AND experiment in the NON-INVASE paper
+"""
+import argparse
 import matplotlib.pyplot as plt
+from matplotlib import rc
 import numpy as np
 import os
 import tensorflow as tf
@@ -8,20 +13,59 @@ from tensorflow.keras import Model
 from non_invase import NonInvase
 from invase import Invase
 
+# Data constants
 N_FEATURES = 11
-
 N_TRAIN = 10000
-N_TEST = 100
-EPOCHS = 1000
+N_TEST = 1000
 SCALE = 10
+
+# Parser constants
+DEFAULT_EPOCHS = 100
+DEFAULT_METHOD = 'NON-INVASE'
+DEFAULT_INVASE_COEFF = 0.1
+DEFAULT_NON_INVASE_COEFF = 0.02
+
+# Configure environment
+np.random.seed(1)
+rc('text', usetex=True)
+
+# Create parser
+parser = argparse.ArgumentParser()
+parser.add_argument(
+    "--method",
+    help="sets variable selection method to use",
+    choices=['INVASE', 'NON-INVASE'],
+    default=DEFAULT_METHOD
+)
+parser.add_argument(
+    "--epochs",
+    help="sets number of epochs to train for",
+    type=int,
+    default=DEFAULT_EPOCHS
+)
+parser.add_argument(
+    "--coeff",
+    help="regularisation coefficient",
+    type=float,
+    default=None
+)
+args = parser.parse_args()
+
+if args.coeff is None:
+    if args.method == 'INVASE':
+        args.coeff = DEFAULT_INVASE_COEFF
+    else:
+        args.coeff = DEFAULT_NON_INVASE_COEFF
 
 # Generate train/test data
 def logit(x):
-
     first = np.divide(1, 1 + np.exp(- SCALE * x[:, 0]))
     second = np.divide(1, 1 + np.exp(- SCALE * x[:, 1]))
     log = (first * second)
     return log
+
+def invase_test(x):
+    l = np.exp(x[:, 0] * x[:, 1])
 
 x_train = np.random.normal(0, 1, size=(N_TRAIN, N_FEATURES)).astype('float32')
 x_test = np.random.normal(0, 1, size=(N_TEST, N_FEATURES)).astype('float32')
@@ -35,16 +79,22 @@ y_test = np.random.binomial(n=1, p=y_test_prob, size=(1, N_TEST)).T.astype('floa
 x_quadrant_test = np.concatenate((
         np.array([[1, 1], [1, -1], [-1, 1], [-1, -1]]),
         np.ones((4, 9))
-        ), axis=1)
+    ), axis=1)
 
 # Plot test data
-plt.scatter(x_test[:, 0], x_test[:, 1], c=y_test[:, 0])
+scatter = plt.scatter(x_test[:, 0], x_test[:, 1], c=y_test[:, 0])
+plt.colorbar(scatter)
+axes = plt.gca()
+axes.set_xlim([-3, 3])
+axes.set_ylim([-3, 3])
+plt.xlabel('$x_1$')
+plt.ylabel('$x_2$')
+plt.title(r'$y$ over $x_1$ and $x_2$')
 plt.show()
 
-# Create test sets
+# Create train and test datasets
 train_ds = tf.data.Dataset.from_tensor_slices(
         (x_train, y_train)).shuffle(10000).batch(32)
-
 test_ds = tf.data.Dataset.from_tensor_slices((x_test, y_test)).batch(32)
 
 # Predictor (& baseline) model
@@ -79,7 +129,12 @@ class SelectorModel(Model):
 error_fn = tf.keras.losses.SparseCategoricalCrossentropy(reduction=tf.keras.losses.Reduction.NONE)
 
 # Create INVASE or NON-INVASE loss
-invase_object = NonInvase(MyModel, SelectorModel, error_fn, prior_coeff=0.03)
+if args.method == 'INVASE':
+    invase_object = Invase(MyModel, SelectorModel, error_fn, norm_coeff=args.coeff)
+elif args.method == 'NON-INVASE':
+    invase_object = NonInvase(MyModel, SelectorModel, error_fn, prior_coeff=args.coeff)
+else:
+    raise ValueError('invalid method given')
 
 # Accuracy metrics
 predictor_train_accuracy = tf.keras.metrics.SparseCategoricalAccuracy(name='predictor_train_accuracy')
@@ -91,8 +146,7 @@ template = ("Epoch {}:\n"
             "Predictor: train loss {}, test loss {}, train accuracy, test accuracy\n"
             "Selector: train loss {}")
 
-for epoch in range(EPOCHS):
-    print(epoch)
+for epoch in range(args.epochs):
     # Reset the metrics at the start of the next epoch
     invase_object.reset_metrics()
     predictor_train_accuracy.reset_states()
@@ -119,7 +173,7 @@ for epoch in range(EPOCHS):
     sel_probs_mean = sel_probs_sum / N_TEST
     sel_probs_variance = sel_probs_sqr_sum / N_TEST - np.square(sel_probs_mean)
 
-    text = template.format(
+    eval_text = template.format(
         epoch + 1,
         invase_object.predictor_train_loss.result(),
         invase_object.predictor_test_loss.result(),
@@ -127,10 +181,37 @@ for epoch in range(EPOCHS):
         predictor_test_accuracy.result() * 100,
         invase_object.selector_train_loss.result()
     )
-    print(text)
+    print(eval_text)
 
-    print(sel_probs_mean)
-    print(sel_probs_variance)
+    print("Selection probs mean:    ", sel_probs_mean)
+    print("Selection probs variance:", sel_probs_variance)
 
     quadrant_sel_probs = invase_object.selector(x_quadrant_test)
     print(quadrant_sel_probs[:, :2])
+
+# Plot selection prob of first feature on (x_1, x_2) plane
+sel_probs = invase_object.selector(x_test)
+plt.grid()
+scatter = plt.scatter(x_test[:, 0], x_test[:, 1], c=sel_probs[:, 0])
+plt.colorbar(scatter)
+axes = plt.gca()
+axes.set_xlim([-3, 3])
+axes.set_ylim([-3, 3])
+plt.xlabel('$x_1$')
+plt.ylabel('$x_2$')
+plt.title(r'$\pi^\theta_1(x)$ over $x_1$ and $x_2$')
+
+# Plot selection prob of second feature on (x_1, x_2) plane
+plt.figure()
+sel_probs = invase_object.selector(x_test)
+plt.grid()
+scatter = plt.scatter(x_test[:, 0], x_test[:, 1], c=sel_probs[:, 1])
+plt.colorbar(scatter)
+axes = plt.gca()
+axes.set_xlim([-3, 3])
+axes.set_ylim([-3, 3])
+plt.xlabel('$x_1$')
+plt.ylabel('$x_2$')
+plt.title(r'$\pi^\theta_2(x)$ over $x_1$ and $x_2$')
+
+plt.show()
