@@ -1,8 +1,19 @@
+"""
+Tensorflow implementation of NON-INVASE method
+"""
 import tensorflow as tf
 
 class NonInvase(object):
 
     def __init__(self, predictor_model, selector_model, error_fn, prior_coeff=0.01):
+        """Initialise
+
+        Args:
+            predictor_model: keras model that the predictor and baseline are constructed from
+            selector_model: keras model that the selector is constructed from
+            error_fn: a function that takes prediction and truth as argument and returns model error
+            prior_coeff: regularisation coefficient for prior divergence
+        """
         self.predictor = predictor_model()
         self.selector = selector_model()
         self.error_fn = error_fn
@@ -14,12 +25,14 @@ class NonInvase(object):
         self.predictor_test_loss = tf.keras.metrics.Mean(name='predictor_test_loss')
 
     def _selector_dropout_vector(self, x, rates=0.5):
+        """Returns random binary vector with the same size as x"""
         uniform_random = tf.random.uniform(shape=tf.shape(x), dtype=x.dtype)
         mask = (uniform_random < tf.cast(rates, dtype=x.dtype))
         
         return tf.cast(mask, dtype=x.dtype)
 
     def _selector_loss(self, error, selection_probs, selection_vectors):
+        """Calculates the loss of the selector model"""
         entropy = tf.math.reduce_sum(
             selection_probs * tf.math.log(selection_probs) + (1 - selection_probs) * tf.math.log(1 - selection_probs), axis=1)
 
@@ -31,6 +44,7 @@ class NonInvase(object):
         return loss
 
     def _param_reg(self, selection_probs, first_weights):
+        """Calculates the regularization term"""
         rank = len(selection_probs.shape)
         weighted_l2 = tf.math.reduce_sum(
                 tf.tensordot(selection_probs, tf.math.square(first_weights), [[rank - 1], [0]]), axis=1)
@@ -40,6 +54,16 @@ class NonInvase(object):
 
     @tf.function
     def train_step(self, features, labels, optimizer):
+        """Performs NON-INVERSE train step
+
+        Args:
+            features: tensor containing batch features
+            labels: tensor containing ground truth response of batch
+            optimizer: keras optimizer
+
+        Returns:
+            Predictor model predictions on features for custom evaluation
+        """
         with tf.GradientTape() as selector_tape:
             # Get selective dropout vector
             selection_probs = self.selector(features)
@@ -79,6 +103,15 @@ class NonInvase(object):
 
     @tf.function
     def test_step(self, features, labels):
+        """Performs NON-INVERSE test step
+
+        Args:
+            features: tensor containing batch features
+            labels: tensor containing ground truth response of batch
+
+        Returns:
+            Predictor model predictions on features for custom evaluation
+        """
         predictor_predictions = self.predictor(features, training=False)
         predictor_loss = self.error_fn(labels, predictor_predictions)
 
@@ -88,6 +121,7 @@ class NonInvase(object):
         return predictor_predictions
 
     def reset_metrics(self):
+        """Resets train and test metrics"""
         # Reset train metrics
         self.predictor_train_loss.reset_states()
         self.selector_train_loss.reset_states()
