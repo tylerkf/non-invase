@@ -1,7 +1,9 @@
 # NON-INVASE
-An implementation of both the INVASE and NON-INVASE algorithm along with experiments.
+A TensorFlow 2.1 implementation of both the INVASE and NON-INVASE algorithm along with experiments.
+https://openreview.net/forum?id=BJg_roAcK7
 
 ### Usage
+The logical AND experiment can be run using the following command,
 ```
 python3 and_experiment.py
 ```
